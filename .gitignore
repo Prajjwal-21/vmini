@@ -1,0 +1,14 @@
+# Build outputs
+build/
+obj_dir/
+
+# Waveforms
+*.fst
+*.vcd
+
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
