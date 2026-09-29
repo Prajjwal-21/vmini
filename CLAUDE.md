@@ -85,8 +85,17 @@ Makefile      top-level targets (lint, sim, test, cosim, uvm, pnr)
 - **Register file:** 2 read ports and 1 write port. x0 is hardwired to zero. It either writes in the first half of the cycle or has a WB→ID bypass, so an instruction in ID sees a value being written back in the same cycle.
 - **Load-use hazard:** stall IF/ID for exactly 1 cycle and insert a bubble into EX.
 - **Branches and jumps:** resolved in EX with static predict-not-taken. A taken branch, JAL, or JALR flushes IF and ID (2-cycle penalty). Keep the design modular so a BTB can be added later.
-- **Stall vs flush:** there is one global `stall` (from the I-cache/D-cache/bus not being ready) that freezes all pipeline registers, and separate per-stage `flush` signals. Document their priority.
-- **Memory interfaces:** the core has separate instruction and data ports using a simple valid/ready request/response handshake. The core never knows whether a cache is present.
+- **Stall vs flush:** there is one global `stall` that freezes all pipeline registers, and separate per-stage `flush` signals. Their priority is documented in `docs/architecture.md`.
+  - `stall` comes only from the **data side**: the instruction in MEM waiting for its D-cache/bus response, or the instruction in EX unable to issue its D-side request.
+  - The **instruction side never stalls the pipeline** (D-014). A decoupled fetch unit with a small fetch queue inserts **bubbles** into ID when no instruction is available, so older instructions keep moving during an I-cache miss.
+  - Fetch responses already in flight when a redirect happens are discarded by a stale-response counter. Branches, traps, MRET and FENCE.I all redirect through this mechanism.
+- **No speculative data access:** a D-side request is issued only when the instruction issuing it is certain to commit. That means no older instruction in MEM can still trap or is still waiting for its response, the instruction has no exception of its own, and no trap or interrupt is being taken. A cancelled store never reaches memory, and a cancelled load never reaches an MMIO device. Instruction fetch only accesses the executable main-memory region.
+- **Memory interfaces:** the core has separate instruction and data ports. Each has a valid/ready request channel and a response channel with no ready, which the core always accepts. Responses come back in order, with an `err` bit. The protocol rules are:
+  - A response arrives **at least one cycle after its request is accepted**.
+  - `rsp_valid` and `rsp_err` **never depend combinationally on `req_valid` or the request payload**. The Phase 4 caches and every later slave must obey this; otherwise the path from a response to the next `dmem_req_valid` becomes a combinational loop.
+  - `req_valid` never depends combinationally on any `ready`.
+
+  The core never knows whether a cache is present.
 
 ### 5.2 CSRs and traps (M-mode only)
 
@@ -166,7 +175,7 @@ Every register map is documented in `docs/memory_map.md` alongside a C header in
 4. **Never weaken, delete, or skip a test to make it pass.** Never modify anything in `third_party/`. If a test seems wrong, explain why and ask.
 5. When debugging, reproduce the issue with the smallest test, inspect the waveform or trace, state the root cause, then fix it. No speculative multi-file changes.
 6. Keep `PROGRESS.md` updated (done / in progress / blocked), and record every architectural decision with its rationale in `docs/decisions.md`.
-7. Make small, focused git commits with descriptive messages. Commit at each passing milestone.
+7. Never run git commit, git push, or any command that rewrites history. The user makes all commits. At each milestone, stop and suggest a commit message and the list of files to include.
 8. Every capability must be reachable through a Makefile target (e.g. `make lint`, `make test-core`, `make riscv-tests`, `make cosim`, `make uvm TEST=...`, `make pnr`).
 9. If a requirement is ambiguous, ask me instead of guessing.
 
@@ -175,7 +184,7 @@ Every register map is documented in `docs/memory_map.md` alongside a C header in
 | Phase | Deliverable | Done when |
 |---|---|---|
 | 0 | Repo skeleton, Makefile, toolchain check, riscv-tests submodule built for RV32, UVM smoke test | `make lint` runs; riscv-tests ELFs build; `make uvm-smoke` passes |
-| 1 | Core with ideal single-cycle memories, no CSRs yet | Directed hazard tests pass. All `rv32ui-p-*` pass when built with the project's CSR-free environment (`sw/common/test_env_nocsr`, `make riscv-tests-nocsr`), which reports pass/fail by storing directly to `tohost` (exclusions documented) |
+| 1 | Core with no CSRs yet, tested with ideal and random-latency memories | Directed hazard tests pass, and all `rv32ui-p-*` pass when built with the project's CSR-free environment (`sw/common/test_env_nocsr`, `make riscv-tests-nocsr`), which reports pass/fail by storing directly to `tohost` (exclusions documented). Everything passes with ideal memory **and** with random latency on both ports, for at least 3 fixed seeds. The seeds are recorded, and any run can be reproduced with `make ... MEM=random SEED=N` (`make accept-phase1`) |
 | 2 | Zicsr, traps, FENCE.I | All `rv32ui-p-*` and `rv32mi-p-*` pass when built with the stock riscv-tests `env/p` environment (exclusions documented) |
 | 3 | RVFI trace + Spike offline co-simulation | Zero mismatches on the full riscv-tests suite |
 | 4 | I-cache and D-cache behind valid/ready ports, with random-latency memory model | All tests and co-simulation still pass with random memory latency; hit/miss counters reported |

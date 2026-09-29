@@ -39,6 +39,12 @@ package soc_pkg;
   localparam addr_t MEM_BASE   = 32'h8000_0000;  // main memory (external AXI4-Lite port)
   localparam addr_t MEM_SIZE   = 32'h0001_0000;  // 64 KB
 
+  // Reserved, simulation only (D-029): the core testbench's sim_ctrl device
+  // (interrupt lines, acknowledge/force registers). The SoC never decodes this
+  // window, so on real hardware an access to it is an access fault.
+  localparam addr_t SIMCTRL_BASE = 32'h4000_0000;
+  localparam addr_t SIMCTRL_SIZE = 32'h0000_1000;  // 4 KB
+
   // ---------------------------------------------------------------------------
   // Reset and cacheability
   // ---------------------------------------------------------------------------

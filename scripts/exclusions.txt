@@ -1,0 +1,9 @@
+# Machine-readable copy of the "Test exclusions" table in docs/decisions.md.
+# Keep the two in sync; every line must cite its decision.
+#
+# Format: <test-name> <last-phase-excluded or *>   # reason (decision)
+#   *  excluded in every phase
+#   N  excluded up to and including phase N
+rv32ui-p-ma_data   *   # D-015: misaligned data accesses trap by design; no emulation handler in the -p env
+rv32ui-p-fence_i   1   # D-016: FENCE.I is Phase 2 scope (NOP in Phase 1)
+rv32mi-p-pmpaddr   *   # D-026: needs a working PMP entry; PMP is not in the spec
