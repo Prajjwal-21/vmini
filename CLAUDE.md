@@ -90,6 +90,7 @@ Makefile      top-level targets (lint, sim, test, cosim, uvm, pnr)
   - The **instruction side never stalls the pipeline** (D-014). A decoupled fetch unit with a small fetch queue inserts **bubbles** into ID when no instruction is available, so older instructions keep moving during an I-cache miss.
   - Fetch responses already in flight when a redirect happens are discarded by a stale-response counter. Branches, traps, MRET and FENCE.I all redirect through this mechanism.
 - **No speculative data access:** a D-side request is issued only when the instruction issuing it is certain to commit. That means no older instruction in MEM can still trap or is still waiting for its response, the instruction has no exception of its own, and no trap or interrupt is being taken. A cancelled store never reaches memory, and a cancelled load never reaches an MMIO device. Instruction fetch only accesses the executable main-memory region.
+- **An issued request is never withdrawn (D-033):** once EX has asserted a D-side request that is not yet accepted, the commit point takes no interrupt until it is accepted (taking one would flush EX and withdraw the request, breaking protocol rule 1 below). The interrupt is taken on a later commit, at the latest on that load/store. Interrupt latency therefore depends on every D-side slave accepting requests within a bounded time (section 5.4).
 - **Memory interfaces:** the core has separate instruction and data ports. Each has a valid/ready request channel and a response channel with no ready, which the core always accepts. Responses come back in order, with an `err` bit. The protocol rules are:
   - A response arrives **at least one cycle after its request is accepted**.
   - `rsp_valid` and `rsp_err` **never depend combinationally on `req_valid` or the request payload**. The Phase 4 caches and every later slave must obey this; otherwise the path from a response to the next `dmem_req_valid` becomes a combinational loop.
@@ -127,6 +128,8 @@ Topology: I-side and D-side requests go through `mem_arbiter`, then an AXI4-Lite
 | Main memory (external port) | `0x8000_0000` | 64 KB | AXI4-Lite |
 
 Accesses to unmapped addresses return SLVERR/PSLVERR, which the core reports as a load or store access fault. The memory map is defined once, in `soc_pkg.sv`, and mirrored in `docs/memory_map.md` and `sw/common`.
+
+**Bounded acceptance (Phases 5 and 6, D-034):** every bus slave, bridge and peripheral must accept a request (assert ready, or PREADY on APB) within a bounded number of cycles that does not depend on software. No slave may hold ready low waiting for software action. For example, a write to a full UART TX FIFO is accepted and sets an overflow flag instead of blocking, and a read of an empty RX FIFO returns data with a status bit instead of waiting. Each slave documents its worst-case acceptance latency. D-033 makes interrupt latency depend on this: an interrupt waits for the pending D-side request to be accepted.
 
 ### 5.5 Peripherals
 
@@ -175,7 +178,7 @@ Every register map is documented in `docs/memory_map.md` alongside a C header in
 4. **Never weaken, delete, or skip a test to make it pass.** Never modify anything in `third_party/`. If a test seems wrong, explain why and ask.
 5. When debugging, reproduce the issue with the smallest test, inspect the waveform or trace, state the root cause, then fix it. No speculative multi-file changes.
 6. Keep `PROGRESS.md` updated (done / in progress / blocked), and record every architectural decision with its rationale in `docs/decisions.md`.
-7. Never run git commit, git push, or any command that rewrites history. The user makes all commits. At each milestone, stop and suggest a commit message and the list of files to include.
+7. Never run git commit, git push, or any command that rewrites history. The user makes all commits. At each milestone, stop and suggest a commit message and the list of files to include. Suggested commit messages carry no `Co-Authored-By` or other AI-attribution trailer.
 8. Every capability must be reachable through a Makefile target (e.g. `make lint`, `make test-core`, `make riscv-tests`, `make cosim`, `make uvm TEST=...`, `make pnr`).
 9. If a requirement is ambiguous, ask me instead of guessing.
 

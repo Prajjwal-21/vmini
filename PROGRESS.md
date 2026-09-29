@@ -3,14 +3,14 @@
 Phase definitions and acceptance criteria: CLAUDE.md section 8.
 Architectural decisions and test exclusions: [docs/decisions.md](docs/decisions.md).
 
-**Current phase: 2. Implemented; `make accept-phase2` passes. Awaiting owner review, including one proposed design change (D-033) and one testbench register added during implementation (`IRQ_RANDOM`, D-029).**
+**Current phase: 3. The design proposal is awaiting owner approval (docs/architecture.md, Phase 3 section, decisions P3.9 D1–D9). Spike is not installed yet. Phase 2 is complete and confirmed.**
 
 | Phase | Deliverable | Status |
 |---|---|---|
 | 0 | Repo skeleton, Makefile, toolchain check, riscv-tests, UVM smoke test | **done** (2026-09-29) |
 | 1 | Core with ideal and random-latency memories, no CSRs | **done** (2026-09-29) |
-| 2 | Zicsr, traps, interrupts, FENCE.I | implemented, acceptance passes; awaiting owner review |
-| 3 | RVFI trace + Spike offline co-simulation | not started |
+| 2 | Zicsr, traps, interrupts, FENCE.I | **done** (2026-09-29) |
+| 3 | RVFI trace + Spike offline co-simulation | in progress: design proposal awaiting approval |
 | 4 | I-cache / D-cache, random-latency memory | not started |
 | 5 | AXI4-Lite interconnect, arbiter, AXI-to-APB bridge | not started |
 | 6 | CLINT, PLIC, UART, SPI | not started |
@@ -79,10 +79,18 @@ All under ideal memory and random latency with 3 seeds, with random interrupts e
 - [x] Bug found and fixed (D-033, **proposed**): an interrupt arriving while EX held an unaccepted D-port request withdrew that request (protocol rule 1). Caught by `mem_model` in `rv32ui-p-lhu`/`ld_st` with random latency and interrupts.
 - [x] **`make accept-phase2`: 462/462 runs pass** (66 tests × 7 configs; `ma_data` and `pmpaddr` excluded), and the interrupt coverage totals meet every derived minimum
 - [x] Mutation check, 6 injected bugs, all caught (interrupt on a serializing instruction, even with its assertions disabled; interrupt `mepc` = pc; trapping instructions retire; D-033 removed; MRET not setting MPIE; EBREAK `mtval` = 0)
-- [ ] Owner review of D-033 and `IRQ_RANDOM`, then confirmation of Phase 2
+- [x] Owner approved D-033 (CLAUDE.md 5.1 updated) and `IRQ_RANDOM`; added the bounded-acceptance rule for Phases 5–6 (D-034, CLAUDE.md 5.4)
+- [x] A run that ends with the random generator paused fails (`irq_paused` in `STATS:`; negative check done with a throwaway test); `accept-phase2` still 462/462
+- [x] Owner confirmed Phase 2
+
+## Phase 3: retirement trace + Spike offline co-simulation
+
+Acceptance (CLAUDE.md section 8): zero mismatches on the full riscv-tests suite.
+
+- [ ] Design proposal (docs/architecture.md, Phase 3 section): **awaiting owner approval** of P3.9 D1–D9
+- [ ] Spike installed (`brew install dtc && brew tap riscv-software-src/riscv && brew install riscv-isa-sim`); the P3.3 facts re-verified on the binary
 
 ## Open items for the project owner
 
-1. D-033 (no interrupt while EX holds an unaccepted D request): proposed, implemented.
-2. `IRQ_RANDOM` register added to `sim_ctrl` (D-029).
-3. Whether to enable UVM DPI for register-model backdoor access (D-011). To decide in Phase 7.
+1. Phase 3 decisions P3.9 D1–D9, and approval to install Spike.
+2. Whether to enable UVM DPI for register-model backdoor access (D-011). To decide in Phase 7.

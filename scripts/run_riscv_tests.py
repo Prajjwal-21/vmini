@@ -26,7 +26,9 @@ coverage events are summed over all +irq runs and compared with the sum of the
 IRQ-EXPECT floors of those runs (P2.13).
 
 Exclusions come from --exclude (scripts/exclusions.txt; format documented
-there). Exit status is non-zero if any run fails or coverage is short.
+there). A run also fails if it ends with the random interrupt generator
+paused (IRQ_RANDOM, D-029). Exit status is non-zero if any run fails or
+coverage is short.
 """
 
 import argparse
@@ -194,6 +196,10 @@ def main():
         result, stats, cmd = simulate(args.sim, hexfile, tohost, irq_count, mem,
                                       irq, seed, args.timeout)
         floors = irq_floors(irq_expect, mem)
+        # A program must not leave random interrupts switched off (IRQ_RANDOM,
+        # D-029): that would silently remove them from the rest of the run.
+        if result == "PASS" and stats.get("irq_paused", 0):
+            result = "FAIL ended with the random interrupt generator paused (IRQ_RANDOM = 0)"
         if result == "PASS":
             short = []
             if label == "ideal":

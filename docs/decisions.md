@@ -262,6 +262,7 @@ Each entry records the context, the decision, and the rationale. Status is one o
 - **Context:** `rv32mi-p-breakpoint` writes `tselect`, `tdata1` and `tdata2`. If they trap, the test's handler sees `mcause = 2` and fails.
 - **Decision:** `tselect`, `tdata1` and `tdata2` exist, read as 0 and ignore writes. `tdata1` = 0 is trigger type 0, "no trigger at this index", which Sdtrig allows. The test then skips every trigger section and passes. `tdata3`, `tinfo` and `tcontrol` stay nonexistent (the test probes `tcontrol` under a temporary `mtvec` and tolerates the trap).
 - **Phase 3 consequence:** Spike implements Sdtrig triggers, so its trace for `rv32mi-p-breakpoint` differs from ours (its `tdata1` read-back matches and the breakpoint sections execute). Phase 3 needs either a Spike configuration with no triggers that matches this design, or a co-simulation-only exclusion of `rv32mi-p-breakpoint`, recorded here when decided.
+- **Phase 3 finding (Spike source, commit `0bff121`; to confirm on the installed binary):** with `--triggers=0`, Spike's `tselect` ignores writes and reads 0, `tdata1`/`tdata2` are constant 0 and `tcontrol` is absent, which matches these stubs exactly. So `rv32mi-p-breakpoint` needs no co-simulation exclusion (architecture.md P3.3).
 
 ## D-026: `rv32mi-p-pmpaddr` is excluded permanently
 
@@ -291,7 +292,7 @@ Each entry records the context, the decision, and the rationale. Status is one o
 - **Date / phase:** 2026-09-29, Phase 2 design
 - **Status:** Accepted (owner decision D8, 2026-09-29)
 - **Decision:** `tb/common/sim_ctrl.sv` drives the three interrupt lines (random generator and software force) and counts acknowledgements. Registers `IRQ_ACK` (0x0), `IRQ_FORCE` (0x4) and `IRQ_LINES` (0x8) sit at `soc_pkg::SIMCTRL_BASE` = `0x4000_0000` (4 KB), reached through `mem_model`'s D-port. The window is recorded in `docs/memory_map.md` as **reserved, simulation only**: the SoC never decodes it, so an access there on real hardware is an access fault.
-- **Addition during implementation (for owner review):** `IRQ_RANDOM` (0xC) pauses (0) or resumes (1) the random generator. `irq_directed.S` pauses it around the checks that need a fixed interrupt order (priority 11, 3, 7; `mepc` of a forced interrupt; an interrupt pending across an exception). Without it those checks would race against randomly raised lines.
+- **Addition during implementation (owner approved 2026-09-29):** `IRQ_RANDOM` (0xC) pauses (0) or resumes (1) the random generator. `irq_directed.S` pauses it around the checks that need a fixed interrupt order (priority 11, 3, 7; `mepc` of a forced interrupt; an interrupt pending across an exception). Without it those checks would race against randomly raised lines. **Owner requirement:** a run fails if it ends with the generator paused (the testbench reports `irq_paused` in its `STATS:` line and the runner fails the run when it is non-zero), so a test cannot silently switch off random interrupts for the rest of its run.
 
 ## D-030: Phase 2 acceptance matrix and interrupt coverage
 
@@ -315,13 +316,26 @@ Each entry records the context, the decision, and the rationale. Status is one o
 ## D-033: No interrupt while EX holds an unaccepted D-port request
 
 - **Date / phase:** 2026-09-29, Phase 2 implementation
-- **Status:** **Proposed** (found while running the Phase 2 tests; implemented, awaiting owner approval)
+- **Status:** Accepted (owner approved 2026-09-29; found while running the Phase 2 tests). CLAUDE.md section 5.1 updated.
 - **Problem:** D-019 checks "no trap or interrupt is being taken" only in the cycle the request is issued. With random latency, EX can assert a request that is not accepted (`ready` = 0), which stalls the pipeline with a completed instruction sitting in MEM. If an interrupt line rises in a later cycle, that instruction takes the interrupt, `kill_ex` flushes EX and the request is withdrawn before acceptance, violating protocol rule 1. `mem_model` caught it in `rv32ui-p-lhu` and `rv32ui-p-ld_st` (`random+irq`, seeds 101/202/303; first seen at cycle 878 of `lhu`, seed 202).
 - **Decision:** `hazard_unit` registers `dreq_hold_q = dmem_req_valid && !dmem_req_ready`. While it is set, the commit point does not take an interrupt (`irq_take` gains `&& !irq_block`). No other kill can arise in that window: MEM was safe when the request was issued (no exception, not waiting, not serializing) and is frozen by the stall, so exceptions and serializing commits cannot appear. The interrupt is taken on a later commit, at the latest on the load/store itself once it reaches MEM, so it cannot be starved.
 - **Consequences:**
   - `dmem_req_valid` depends on `ready` only through a register, so protocol rule 2 still holds.
   - New assertion `a_dreq_stable` in `core_top`: a request asserted without `ready` is asserted again, unchanged, in the next cycle.
   - The P2.13 event E1 is unaffected: the loads/stores it counts are the ones that have *not* asserted their request (blocked by `kill_ex` in the interrupt cycle, or held by the issue rule while MEM waits for a response).
+  - **Interrupt latency now depends on the slaves.** While a request is held unaccepted, interrupts wait. If a slave could hold `ready` low indefinitely (for example until software drains a FIFO), an interrupt, possibly the very one that would let software drain it, could wait forever. D-034 rules that out for every slave.
+
+## D-034: Every bus slave and peripheral accepts requests within a bounded time
+
+- **Date / phase:** 2026-09-29, recorded after Phase 2 for Phases 5 and 6
+- **Status:** Accepted (owner decision, 2026-09-29). CLAUDE.md section 5.4.
+- **Decision:** every bus slave, bridge and peripheral (interconnect, `axil2apb`, main-memory port, CLINT, PLIC, UART, SPI, and the caches acting as slaves of the core) must accept a request within a bounded number of cycles that does not depend on software. None may hold ready/PREADY low waiting for software action:
+  - a write to a full UART or SPI TX FIFO is accepted, drops the data and sets an overflow flag;
+  - a read of an empty RX FIFO returns data with a status bit showing it is not valid;
+  - no register access waits for a transfer to finish.
+  Each slave documents its worst-case acceptance latency in its header comment and `docs/memory_map.md`.
+- **Rationale:** D-033 defers interrupts while a D-side request is held unaccepted, so the worst-case interrupt latency is bounded by the slowest slave's acceptance latency plus the pipeline drain. With software-dependent back-pressure, that bound would not exist, and a handler that must run to release the back-pressure could deadlock.
+- **Verification (Phase 6/7):** each peripheral's testbench and the UVM agents check a maximum ready latency.
 
 ---
 

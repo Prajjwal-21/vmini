@@ -537,7 +537,7 @@ commit     = can_commit && !stall                          // retires (minstret,
 - **Exceptions beat interrupts on the same instruction.** An instruction with an exception never commits, so no interrupt can ride on it. The pending interrupt is taken after the handler's `mret`, on the next committing instruction.
 - **No interrupt on a serializing instruction** (CSR*, MRET, FENCE.I). `irq_pend` uses the CSR state from before the committing instruction. So without this rule, an interrupt could be taken after a `csrci mstatus, MIE` using the old MIE=1, or after MRET using the handler's MIE=0 instead of the restored value. With the rule, the next committing instruction sees the new state. This is a strict superset of the required rule (no interrupt on an instruction that clears MIE, or on MRET), and costs nothing because those instructions flush anyway.
 - **Every other committing instruction can carry an interrupt,** including loads and stores whose response has arrived. So interrupts cannot be starved (4.6).
-- **No interrupt while EX holds an unaccepted D-port request (D-033, proposed).** Protocol rule 1 forbids withdrawing an asserted request, and `kill_ex` would withdraw it. The completed instruction stalled in MEM therefore commits without the interrupt; the interrupt is taken on a later commit (at the latest on the load/store itself). Exceptions and serializing commits cannot arise in that window, because MEM was safe when the request was issued and is frozen by the stall.
+- **No interrupt while EX holds an unaccepted D-port request (D-033).** Protocol rule 1 forbids withdrawing an asserted request, and `kill_ex` would withdraw it. The completed instruction stalled in MEM therefore commits without the interrupt; the interrupt is taken on a later commit (at the latest on the load/store itself). Exceptions and serializing commits cannot arise in that window, because MEM was safe when the request was issued and is frozen by the stall.
 - **Exception priority within one instruction** (privileged spec order, only the combinations possible here):
   1. Instruction access fault (`if_fault`; the fault entry carries instruction bits 0, which also decode as illegal)
   2. Illegal instruction
@@ -633,7 +633,7 @@ It owns the three interrupt lines driven into `core_top` (`irq_external_i`, `irq
 | 0x0 | `IRQ_ACK` | W | Write an interrupt cause code (3/7/11). Lowers that line from the cycle after the store is accepted and counts one acknowledgement. Acknowledging a line that is low fails the test. |
 | 0x4 | `IRQ_FORCE` | W | Bit 3/7/11 set raises that line from the cycle after acceptance. Used by directed tests for deterministic scenarios; works with the generator on or off. |
 | 0x8 | `IRQ_LINES` | R | Current line state, bits 3/7/11 |
-| 0xC | `IRQ_RANDOM` | R/W | **(added in implementation)** 0 pauses the random generator, 1 resumes it; lines already high stay high until acknowledged. `irq_directed.S` pauses it around the checks that need a fixed order (priority 11, 3, 7; `mepc` of a forced interrupt). |
+| 0xC | `IRQ_RANDOM` | R/W | 0 pauses the random generator, 1 resumes it; lines already high stay high until acknowledged. `irq_directed.S` pauses it around the checks that need a fixed order (priority 11, 3, 7; `mepc` of a forced interrupt). A run that ends with the generator paused fails (D-029). |
 
 The address is outside every SoC region and below the cacheability boundary, so the Phase 4 D-cache bypasses it. The SoC decodes it as unmapped, so the device never escapes the core testbench.
 
@@ -799,3 +799,174 @@ IRQ-EXPECT(ideal): irq_ex_memop>=4 irq_redirect>=4
 | E5 | `exc_irq` | 5 | 5 | **30** |
 
 The runner computes the aggregate floors from the `IRQ-EXPECT` lines and the configurations actually run, so the two can never disagree. The report prints, for each event, the total, the `irq_cov` part and the random-stimulus part (all other tests), plus `irq_ex_memop_held`. The random-stimulus part is reported, not gated: it depends on the seeds, and a floor for it could only be measured, not derived (D-022).
+
+---
+
+# Phase 3: retirement trace and Spike co-simulation
+
+> **Status: PROPOSED, awaiting owner approval.** No RTL or scripts are written until this is approved. Decisions needed: [P3.9](#p39-decisions-needed).
+>
+> **Spike is not installed** (`make check-tools PHASE=3` fails). Install: `brew install dtc && brew tap riscv-software-src/riscv && brew install riscv-isa-sim`. Everything below about Spike was checked in the **source** of Spike `main` at commit `0bff121` (2026-09-28), which is what that formula builds (it tracks `main`, unpinned; its bottles are for macOS 15 only, so it builds from source here). **Nothing has been verified against an installed binary yet.** P3.3 lists each option and fact with its source location; the first implementation step is to re-verify every one on the installed binary and record the result.
+
+## P3.1 (a) Scope
+
+Offline co-simulation runs our simulator and Spike on the same ELF, writes both retirement traces, and compares them instruction by instruction. Spike cannot model `sim_ctrl` (interrupt lines, `IRQ_ACK`/`IRQ_FORCE`) or the testbench's interrupt timing, so offline co-simulation covers only runs **without interrupts and without `sim_ctrl` accesses**.
+
+**Configurations:** `ideal` and `random` (random latency), both with `+irq=off`, seeds 101/202/303: **4 runs per test**. Memory latency does not change the architectural trace, so the random-latency runs must produce exactly the same trace as the ideal run. That catches pipeline bugs that corrupt a value silently (for example a wrong forwarded value stored to a location nobody reloads), which the self-checking tests cannot see.
+
+| Test set | ELFs | Offline co-sim | Reason if not |
+|---|---|---|---|
+| `rv32ui-p-*` | stock, unmodified (41, `ma_data` excluded by D-015) | yes | |
+| `rv32ui-p-*` interrupt-hook build | `build/riscv-tests-irq/` | no | only used with random interrupts |
+| `rv32mi-p-*` | stock (15, `pmpaddr` excluded by D-026) | yes | |
+| `hz_fwd`, `hz_load_use`, `hz_ctrl` | CSR-free env | yes | needs a `fromhost` symbol in the CSR-free env (P3.9 D6) |
+| `tr_misaligned`, `tr_ecall_ebreak_mret` | stock env + handler | yes | |
+| `tr_access_fault` | | yes, after moving the address-0 case out (P3.4) | Spike maps its debug module at `[0x0, 0x1000)` |
+| `csr_ops`, `tr_illegal` | | yes, after moving the implementation-defined checks out (P3.4) | |
+| `csr_impl`, `tr_illegal_impl`, `tr_access_fault_null` (new, split out) | | **no** (named exclusion) | they check choices where the spec allows either value and Spike's differs from ours |
+| `irq_directed`, `irq_cov` | | **no** (named exclusion) | use `sim_ctrl` and forced interrupts |
+| All `+irq` configurations | | **no** | random interrupts |
+
+The co-simulation exclusions go in a new file, `scripts/cosim_exclusions.txt`, with one reason per line, like `scripts/exclusions.txt`. Every excluded test still runs in `accept-phase2`, so nothing loses coverage.
+
+**Lockstep DPI co-simulation (Spike stepped per retirement, interrupts and MMIO read values injected): proposed to be deferred** until after Phase 6, when the real CLINT/PLIC/UART/SPI exist (Phase 7 at the latest).
+- **What deferring costs:** every run with interrupts (1935 interrupts taken per `accept-phase2`) and every `sim_ctrl` test is checked only by the self-checking software, the testbench's end-of-run and entry checks (P2.9), the assertions, and the P2.13 coverage. None of it is compared against a reference model, so a wrong but self-consistent value (for example a wrong `mtval` that no handler reads) goes unnoticed in those runs. Phase 5/6 MMIO reads cannot be compared offline either, and are marked "don't compare values" per CLAUDE.md section 6.
+- **What doing it now costs:** building Spike as a library (`libriscv`) and linking it into the Verilator simulation, with DPI glue for stepping and injecting interrupts and read values. That needs space-free paths (D-010) and a C++ build that tracks an unpinned upstream API. Most of the value arrives with the peripherals in Phases 5 and 6, so doing it now means doing it twice.
+
+## P3.2 (d) Retirement trace
+
+### Core port (`core_top`, `ifndef SYNTHESIS`)
+
+One `rvfi_t` struct output, `rvfi_o`, valid for one cycle when the instruction in MEM leaves the commit point: `retire` (it commits) or `trap_take` (it raises an exception). The fields follow RVFI naming where they apply:
+
+| Field | Meaning |
+|---|---|
+| `valid` | an instruction left MEM this cycle (retired, or trapped) |
+| `order` | 64-bit count of `valid` beats (the checker requires it to increase by one) |
+| `insn`, `pc_rdata`, `pc_wdata` | instruction bits, its pc, and the pc of the next instruction to execute (trap vector, MRET target, branch target, or pc+4) |
+| `rd_addr`, `rd_wdata` | 0 when the instruction writes no register (including a trapping one) |
+| `mem_addr`, `mem_rmask`, `mem_wmask`, `mem_rdata`, `mem_wdata` | the D-port access, byte address and lane masks as sent |
+| `csr_we`, `csr_addr`, `csr_wdata` | a CSR written by this instruction, with the value **read back after the write**. Set for CSR instructions with write intent, and for MRET (`mstatus`). Counter increments are not writes. |
+| `trap`, `trap_cause`, `trap_tval` | the instruction raised an exception: it did not retire; `mepc` = `pc_rdata` |
+| `intr`, `intr_cause`, `intr_epc` | this instruction retired and an interrupt was taken after it (`mepc` = `intr_epc` = its `next_pc`) |
+
+The testbench (`+rvfi=<file>`) writes one line per beat:
+
+```
+I <order> <pc> <insn> [x<rd>=<value>] [ld <addr> <rmask>] [st <addr> <wmask> <data>] [csr <addr>=<value>]
+E <order> <pc> <insn> cause=<n> tval=<value>        exception: nothing else retired
+Q cause=<n> epc=<value>                              interrupt entry, after the preceding I line
+```
+
+Store data is normalized to the bytes actually written (shifted to bit 0), as Spike logs it.
+
+### How the same events appear in Spike's log (checked in source)
+
+Spike runs with both `-l` (the debug log with the disassembly of every executed instruction and the exception lines) and `--log-commits` (one commit line per retired instruction), into one file (`--log=<file>`):
+- **Retired instruction:** `core   0: 3 0x80000004 (0x02028593) x11 0x80000030 c768_mstatus 0x00001880 mem 0x80001000 0x00000001`. The fields are: privilege, pc, instruction, register writes, CSR writes as `c<number>_<name>`, then loads (`mem <addr>`) and stores (`mem <addr> <data>`, data in the store's width). `riscv/execute.cc`, `commit_log_print_insn`.
+- **Exception:** the trapping instruction gets **no** commit line (the trap is thrown before logging). With `-l`, `take_trap` prints `core   0: exception trap_illegal_instruction, epc 0x80000124` followed, when the trap has a value, by `core   0:           tval 0x74445073` (`riscv/processor.cc`). The comparator maps the trap name to the cause code, takes `insn` from the preceding `-l` disassembly line for the same pc, and uses `tval` = 0 when no tval line follows (ECALL).
+- **Trap-entry CSR writes** (`mepc`, `mcause`, `mtval`, `mstatus`) do not appear in either trace. They are compared through the `E`/`Q` fields, and through every later CSR read and `mret`.
+- **Interrupts** would appear the same way as exceptions (`take_trap` also handles them). Offline, none can occur: an interrupt in our trace in an offline-scope run is a failure.
+
+The comparator converts Spike's log into the same `I`/`E` line format, then compares line by line: pc, instruction, register write (number and value), memory address/mask/data, CSR write (number and value), and trap cause/tval.
+
+## P3.3 (b) Spike configuration
+
+```
+spike --isa=rv32i_zicsr_zifencei_zicntr --priv=m --pmpregions=0 --triggers=0 \
+      -m0x80000000:0x10000 --pcs=0:0x80000000 --dtb=build/cosim/core.dtb \
+      --wfi-as-nop --instructions=<timeout> -l --log-commits --log=<file> <elf>
+```
+
+| Option / fact | Why | Where checked in source |
+|---|---|---|
+| `--isa=rv32i_zicsr_zifencei_zicntr` | Our instruction set. **`zicntr` is required:** without it Spike has no `cycle`/`instret`/`cycleh`/`instreth` (`rv32mi-p-zicntr`). `misa` then reads `0x4000_0100`, same as ours. | `spike.cc` help; `csr_init.cc` (counters behind `EXT_ZICNTR`) |
+| `--priv=m` | M-mode only. `satp`, `medeleg`, `mideleg`, `mcounteren` are then absent (illegal, as in our core); `mstatus.MPP` legalizes to M; `mstatus` writable bits are MIE, MPIE, MPP only, the same as ours. | `csr_init.cc` (`add_supervisor_csr`/`add_user_csr`), `csrs.cc` `mstatus_csr_t::unlogged_write` |
+| `--pmpregions=0` | No PMP. Spike then raises an illegal-instruction trap on any `pmpaddr*` access, exactly like our core, so the stock env's `INIT_PMP` probe takes the same trap in both. | `csrs.cc` `pmpaddr_csr_t::verify_permissions` (`n_pmp == 0` → illegal) |
+| `--triggers=0` | Spike's Sdtrig with zero triggers: `tselect` ignores writes ≥ the trigger count (reads 0), `tdata1`/`tdata2` are constant 0, `tcontrol` is absent. That is **exactly our D-025 stubs**, so `rv32mi-p-breakpoint` needs **no co-sim exclusion** (resolves the D-025 Phase 3 note). Spike also has `tdata3` and `tinfo` (constant 0), which we lack; see P3.4. | `csr_init.cc` (`trigger_count > 0` branch), `csrs.cc` `tselect_csr_t` |
+| `-m0x80000000:0x10000` | Main memory, 64 KB, as `soc_pkg`. Addresses past it fault in both. | `spike.cc` help |
+| `--pcs=0:0x80000000` | Starts hart 0 at our reset pc **without executing the boot ROM** (help text: "This will bypass the built-in boot ROM"; `sim.cc` `proc_reset` sets the pc directly). Registers start at 0 in both. | `spike.cc`, `sim.cc` |
+| `--dtb=build/cosim/core.dtb` | A device tree with one hart and the memory node only. Spike creates CLINT, PLIC and the 16550 UART **only from device-tree nodes** (`sim.cc`: "clint, plic, ns16550 are always discovered via dtb"). Without this, Spike's CLINT would be at `0x0200_0000` with a free-running `mtime`. The source `core.dts` is generated from `soc_pkg` values and compiled with `dtc` (a dependency of the formula). | `sim.cc` device-factory loop |
+| `--wfi-as-nop` | Our WFI is a NOP; Spike would otherwise wait for an interrupt that never comes. | `spike.cc` help |
+| `--instructions=<n>` | Timeout, the same budget as the testbench's. | `spike.cc` help |
+| no `--misaligned` | Misaligned data accesses trap in both (D-015). | |
+| HTIF | Spike ends the run when the program writes `tohost` (needs both `tohost` **and** `fromhost` symbols). The stock env has both; the CSR-free env has only `tohost` (P3.9 D6). | fesvr, to verify on the binary |
+
+**Regions Spike maps that our SoC does not** (they cannot be removed by options): the debug module at `[0x0, 0x1000)` (`sim.cc`: `bus.add_device(DEBUG_START, …)`, always) and the boot ROM at `0x1000` (always added, holding the reset code and the device tree, rounded up to 4 KB pages). A load from address 0 therefore faults in our core but not in Spike, which is why the address-0 case of `tr_access_fault` moves to its own test (P3.4). No other offline-scope test touches `[0x0, 0x2000)`.
+
+**Values that differ:** `marchid` is hard-coded to 5 in Spike (Spike's registered architecture ID; we must not claim it) and 0 in ours. `mvendorid` and `mimpid` are 0 in both. `mcycle` counts retired instructions in Spike and clock cycles in ours. These become rules R3 and R4.
+
+**Pinning:** the formula builds whatever `main` is on install day. Proposal: record the installed commit in `docs/decisions.md`, have `make check-tools` print it, and re-run the P3.3 checks whenever it changes.
+
+## P3.4 Where Spike and our core legitimately differ, and how each is handled
+
+| Item | Spike | Ours | Handling (proposed) |
+|---|---|---|---|
+| `marchid` | 5 | 0 | Rule **R3** (value divergence) in `rv32mi-p-mcsr`. `csr_ops` case 27 moves to `csr_impl`. |
+| `mcycle`/`cycle`(`h`) read values | instructions | clock cycles | Rule **R4**. `csr_ops` case 40 (`mcycle` > 0 right after writing 0) moves to `csr_impl`. |
+| `mtvec.MODE` | bit 0 writable (vectored supported) | read-only 0 (D-024) | `csr_ops` case 16 moves to `csr_impl` |
+| `mcause` width | all 32 bits writable | bit 31 and [3:0] | `csr_ops` case 29 (write all-ones) moves to `csr_impl` |
+| `mcountinhibit` | exists (CY, IR writable) | absent (illegal) | **D1: implement it** (CY and IR, functional; the privileged spec recommends it). Otherwise `rv32mi-p-instret_overflow`'s probe traps only in ours and a resync rule would be needed. |
+| `tdata3`, `tinfo` | exist, constant 0 | absent | **D1: add as read-zero stubs**, completing the zero-trigger Sdtrig set of D-025 |
+| `mconfigptr` | exists, 0 | absent | **D1: add as read-only 0** (required by privileged spec 1.12) |
+| `time`/`timeh` | exist (with `zicntr`), read 0 without a CLINT | absent (illegal) | `tr_illegal` case 27 moves to `tr_illegal_impl`; **D2**: whether the core implements `time` from the CLINT's `mtime` in Phase 6 |
+| Address `0x0` | debug module (no fault) | access fault | `tr_access_fault` case 3 moves to `tr_access_fault_null` |
+
+"Moves" means the check is cut from one test and pasted into a new test **unchanged**. The new test still runs in every `accept-phase2` configuration, so no check is weakened or dropped; only offline co-simulation skips it, by name. With D1 approved, `tr_illegal` cases 24 and 25 (`tdata3`, `mcountinhibit` illegal) become wrong. They are replaced by `tcontrol` (0x7A5) and `mhpmcounter3` (0xB03), which neither implementation has.
+
+## P3.5 (c) Comparator rules
+
+`scripts/cosim_compare.py` compares the normalized traces and fails on the **first** difference that no rule covers. On failure it prints that line from both traces, the 10 lines before it, and the disassembly. Each rule has an ID, a reason, and an exact match condition. The report prints how many times each rule fired per test, and a rule that fires where it is not expected (for example R3 on anything but a `marchid` read) is itself a failure. There is no pattern-based or blanket ignore.
+
+| ID | Rule | Reason |
+|---|---|---|
+| **R1** `BOOT` | Spike's first record must be at `0x8000_0000`. With `--pcs` the boot ROM never executes. If the binary check shows `--pcs` does not do this, the fallback skips exactly the five known ROM instructions (`auipc t0`, `addi a1`, `csrr a0, mhartid`, `lw t0, 24(t0)`, `jr t0`) at `0x1000`–`0x1010` and nothing else. | Spike's reset code; our core starts at `RESET_PC` |
+| **R2** `END` | Comparison ends at the first store to `tohost`, in both traces. Spike's later records are dropped, but only if they are the program's own `write_tohost` loop (pc within the loop, stores only to `tohost`/`tohost+4`). Both runs must also report pass: `tohost` = 1 in the testbench, exit 0 in Spike. | Our testbench stops at the store; Spike exits when HTIF next polls `tohost` |
+| **R3** `MARCHID` | A CSR read of `marchid` (0xF12): `rd` may be 0 (ours) vs 5 (Spike). | Spike's registered ID; ours is 0 (unregistered). |
+| **R4** `CYCLE` | A CSR read of `mcycle`, `mcycleh`, `cycle`, `cycleh`: `rd` values may differ. Writes to `mcycle`/`mcycleh` are compared normally. | Ours counts clock cycles, Spike counts instructions; both are legal. |
+| **R5** `LONG-ENC` | For an instruction with `inst[4:0] = 11111` (a 48- or 64-bit length encoding), compare only the low 32 bits of the instruction. `mtval` is XLEN wide, so it compares as is. | Spike fetches 6 or 8 bytes for such encodings (`decode.h` `insn_length`); ours has no long instructions and traps on the first 32 bits. Used by `tr_illegal` case 5 (`0x0000057f`). |
+
+**Value-divergence rules (R3, R4) and taint.** The destination register of an R3/R4 read is marked *tainted*. Taint propagates through data flow: results computed from a tainted source register are tainted, a store of tainted data taints those memory bytes, and a load from tainted bytes taints its result. A value mismatch is allowed only on tainted data. A pc, instruction, trap or memory-address mismatch is **never** allowed, so a divergent value that changes control flow or addressing still fails. Taint is cleared when the register is overwritten with an untainted value.
+
+Rules that may be needed after the binary check, **not proposed yet**: if Spike logs extra CSR records for RV32 counter writes (for example `minstreth` alongside `minstret`), a normalization rule would be proposed with the log evidence. No rule is added without your approval.
+
+## P3.6 Make targets and files (implementation, after approval)
+
+- `rtl/core/core_top.sv`: the `rvfi_o` port. `tb/core_tb/core_tb_top.sv`: the `+rvfi=<file>` trace writer and checker (`order` increases by one, no `Q` line in an `+irq=off` run).
+- `scripts/cosim_compare.py` (Spike runner, log normalizer, comparator, rules), `scripts/cosim_exclusions.txt`, and `build/cosim/core.dts` generated from `soc_pkg` values.
+- `make cosim` (the whole Phase 3 set, 4 configurations) and `make cosim TEST=<elf> [MEM=random SEED=N]` for one run. `make test` gains `cosim`.
+- `check_tools.py` requires `spike` and `dtc` for phase 3 and prints Spike's commit.
+- **Phase 3 acceptance (CLAUDE.md section 8, "zero mismatches on the full riscv-tests suite"):** zero unexplained mismatches for every in-scope `rv32ui-p` and `rv32mi-p` test, and for the in-scope directed tests, in all 4 configurations. The per-rule usage counts are recorded in the results.
+
+## P3.7 (e) Mutation plan: bugs only co-simulation catches
+
+**Protocol.** A mutant counts only if it (1) **passes** `make accept-phase2` and `accept-phase1` completely, proving the self-checking tests, testbench checks and assertions miss it, and (2) **fails** `make cosim` at the first affected instruction. A candidate that fails (1) is reported as "already caught by self-checks" and replaced, never counted. All RTL is restored from a copy afterwards, and each result is recorded in `PROGRESS.md`.
+
+| # | Injected bug | Why self-checks miss it | Why co-sim catches it |
+|---|---|---|---|
+| CM1 | CSRRS/CSRRC with `rs1 = x0` performs a write of the value just read, on the non-counter RW CSRs (`mscratch`, `mtvec`, `mepc`, …) | the value is unchanged, so no software can see it | our trace shows a `csr` write that Spike's log does not |
+| CM2 | `sh` to offset 0 also enables byte lane 2 (the replicated low byte is written there) | only visible if byte 2 is read back later | store mask/data differ from Spike's 2-byte store |
+| CM3 | For an illegal-instruction trap on an access to a **nonexistent** CSR with `rd = x0` (for example the env's `csrw pmpaddr0`), `mtval` = 0 instead of the instruction bits | the stock env's probe handlers never read `mtval`; `tr_illegal`'s nonexistent-CSR cases all use `rd = a0` (its `rd = x0` case, `unimp`, is a read-only-CSR write and keeps the correct `mtval`) | the `E` line's `tval` differs from Spike's |
+| CM4 | A load result is written with the wrong extension (`lbu` behaving as `lb`) **only** when the next instruction overwrites the same `rd` | the wrong value is dead before anything reads it | `rd` value differs on the load's own `I` line |
+| CM5 | Under random latency only: a store whose data is forwarded from MEM/WB during a D-side stall takes the value from one cycle too early, on stores to a region that is never reloaded | the stored value is never read back; ideal mode is unaffected | the `random` configuration's store data differs from Spike's (and from our own `ideal` trace) |
+
+CM4 and CM5 are deliberately narrow; if a regression test turns out to observe them, they are replaced by a candidate from the same class (a dead value, or a silent memory corruption).
+
+## P3.8 Documents updated at approval
+
+- `docs/decisions.md`: D-035 onward (scope, lockstep deferral, Spike config and pin, the core alignments, the test splits, the rules and taint semantics, the CSR-free env's `fromhost`). D-025's Phase 3 note is resolved by `--triggers=0`.
+- CLAUDE.md section 6: records that offline co-sim runs with interrupts off and without `sim_ctrl`, and the lockstep deferral.
+
+## P3.9 Decisions needed
+
+| # | Question | Recommendation |
+|---|---|---|
+| D1 | Align the core with Spike where the spec recommends or requires the CSR: `mcountinhibit` (CY, IR; functional), `tdata3`/`tinfo` (read-zero stubs), `mconfigptr` (read-only 0) | **Yes.** About 2 flip-flops plus decode; removes a resync rule; `tr_illegal` cases 24/25 then use `tcontrol` and `mhpmcounter3` |
+| D2 | `time`/`timeh`: stay absent (illegal) for now; decide in Phase 6 whether the core reads `mtime` from the CLINT | **Stay absent now, decide in Phase 6** |
+| D3 | Keep our other choices (`mtvec` direct-only, `mcause` = interrupt bit + 4-bit code, `marchid` = 0) and move their checks to `csr_impl`/`tr_illegal_impl`, which co-sim skips by name | **Yes** |
+| D4 | Move `tr_access_fault`'s address-0 case to `tr_access_fault_null` (Spike's debug module lives there) | **Yes** |
+| D5 | Co-sim configurations: `ideal` + `random` × 3 seeds, interrupts off (4 runs per test) | **Yes** |
+| D6 | Add a `fromhost` symbol to the CSR-free environment (`sw/common/test_env_nocsr`, ours), so Spike's HTIF can end the `hz_*` runs | **Yes** |
+| D7 | Defer lockstep DPI co-simulation to after Phase 6 (Phase 7 at the latest), with the cost stated in P3.1 | **Yes** |
+| D8 | Rules R1–R5 with taint for R3/R4, exactly as in P3.5 | **Yes** |
+| D9 | Spike install (Homebrew, builds `main` from source), with the installed commit recorded and printed by `check-tools` | **Yes**, install when you approve; the P3.3 checks are then repeated on the binary before any comparator code is written |

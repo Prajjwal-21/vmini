@@ -12,7 +12,8 @@
 //              (symbol irq_handled), when the program has one.
 // Output     : one line "RESULT: PASS" or "RESULT: FAIL <reason>", and one
 //              line "STATS: key=value ..." with cycles, retired instructions,
-//              hazard event counts and interrupt counts. scripts/
+//              hazard event counts, interrupt counts, and irq_paused (1 if the
+//              program left the random generator paused; the runner fails it). scripts/
 //              run_riscv_tests.py parses both.
 // Checks     : at the end of the run (P2.9): interrupt entries == IRQ_ACK
 //              writes == irq_handled; raised - acked == lines still high. On
@@ -286,12 +287,12 @@ module core_tb_top;
 
   task automatic finish(string result);
     $display("RESULT: %s", result);
-    $display("STATS: cycles=%0d retired=%0d fwd_exmem=%0d fwd_memwb=%0d wb_bypass=%0d load_use=%0d redirect=%0d fetch_drop=%0d stall=%0d exc=%0d irq=%0d irq_raised=%0d irq_acked=%0d irq_forced=%0d irq_ex_memop=%0d irq_ex_memop_held=%0d irq_ldst=%0d irq_redirect=%0d irq_defer_csr=%0d irq_defer_mret=%0d irq_defer_fencei=%0d exc_irq=%0d",
+    $display("STATS: cycles=%0d retired=%0d fwd_exmem=%0d fwd_memwb=%0d wb_bypass=%0d load_use=%0d redirect=%0d fetch_drop=%0d stall=%0d exc=%0d irq=%0d irq_raised=%0d irq_acked=%0d irq_forced=%0d irq_ex_memop=%0d irq_ex_memop_held=%0d irq_ldst=%0d irq_redirect=%0d irq_defer_csr=%0d irq_defer_mret=%0d irq_defer_fencei=%0d exc_irq=%0d irq_paused=%0d",
              cycles, retired, n_fwd_exmem, n_fwd_memwb, n_wb_bypass, n_load_use,
              n_redirect, n_fetch_drop, n_stall, n_exc, n_irq,
              sum3(u_sc.raised), sum3(u_sc.acked), u_sc.forced,
              n_irq_ex_memop, n_irq_ex_memop_held, n_irq_ldst, n_irq_redirect,
-             n_defer_csr, n_defer_mret, n_defer_fencei, n_exc_irq);
+             n_defer_csr, n_defer_mret, n_defer_fencei, n_exc_irq, u_sc.paused_q);
     $finish;
   endtask
 
